@@ -1333,9 +1333,19 @@ class HTTP11ClientProtocol(Protocol):
             self._state = 'TRANSMITTING_AFTER_RECEIVING_RESPONSE'
             self._responseDeferred.chainDeferred(self._finishedRequest)
     
-        if self._parser is not None:
+        # FIXME: Theres' a race condition between here and _disconnectParser
+        # rewriting self._parser to None. The proper fix (I think) is to move
+        # the rest of the code in this method into a callback to eliminate
+        # the race condition, or at least .pause() and .unpause() whichever
+        # Deferred is firing while this code runs.
+        #
+        # For the meantime, here is a HACK to keep a reference to the
+        # parser so we don't get an AttributeError when trying to
+        # read the headers.
+        parser = self._parser
+        if parser is not None:
             reason = ConnectionDone("synthetic!")
-            connection = self._parser.connHeaders.getRawHeaders('Connection')
+            connection = parser.connHeaders.getRawHeaders('Connection')
             keepalive = connection and connection[0].lower() == 'keep-alive'
         else:
             keepalive = False
