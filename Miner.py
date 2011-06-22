@@ -31,7 +31,7 @@ class Miner(object):
     """The main managing class for the miner itself."""
     
     # This gets updated automatically by SVN.
-    REVISION = int('$Rev$'[6:-2])
+    REVISION = int('$Rev$'[6:-2]) if '$Rev$'.strip('$') != 'Rev' else 0
     VERSION = 'r%s' % REVISION
     
     def __init__(self):
