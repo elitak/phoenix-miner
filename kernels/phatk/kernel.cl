@@ -1,7 +1,7 @@
 // This file is taken and modified from the public-domain poclbm project, and
 // we have therefore decided to keep it public-domain in Phoenix.
 
-// 2011-07-01: further modified by Diapolo and still public-domain
+// 2011-07-03: further modified by Diapolo and still public-domain
 
 #ifdef VECTORS
 	typedef uint2 u;
@@ -62,29 +62,21 @@ __constant uint H[8] = {
 #define ch(n) (Ch(Vals[(132 - n) % 8], Vals[(133 - n) % 8], Vals[(134 - n) % 8]))
 #define maj(n) (Ma(Vals[(129 - n) % 8], Vals[(130 - n) % 8], Vals[(128 - n) % 8]))
 #define t1(n) (Vals[(135 - n) % 8] + K[n % 64] + W[n] + ch(n) + s1(n))
-#define t1W(n) (Vals[(135 - n) % 8] + K[n % 64] + w(n) + ch(n) + s1(n))
-#define t2(n) (s0(n) + maj(n))
-
-// W calculation used for SHA round
-#define w(n) (W[n] = P1(n) + P2(n) + P3(n) + P4(n))
+#define t1W(n) (Vals[(135 - n) % 8] + K[n % 64] + W(n) + ch(n) + s1(n))
 
 // Full W calculation
-#define R(x) (W[x] = (rot(W[x - 2], 15) ^ rot(W[x - 2], 13) ^ ((W[x - 2]) >> 10U)) + W[x - 7] + (rot(W[x - 15], 25) ^ rot(W[x - 15], 14) ^ ((W[x - 15]) >> 3U)) + W[x - 16])
+#define W(x) (W[x] = P3(x) + P4(x) + P1(x) + P2(x))
 
-// Partial W calculations (used for the begining where only some values are nonzero)
-#define r0(x) ((rot(x, 25) ^ rot(x, 14) ^ (x >> 3U)))
-#define r1(x) ((rot(x, 15) ^ rot(x, 13) ^ (x >> 10U)))
-#define R0(n) ((rot(W[n], 25) ^ rot(W[n], 14) ^ (W[n] >> 3U)))
-#define R1(n) ((rot(W[n], 15) ^ rot(W[n], 13) ^ (W[n] >> 10U)))
-#define P1(x) R1(x - 2)
-#define P2(x) R0(x - 15)
+// Partial W calculations (used for the beginning where only some values are nonzero)
+#define P1(x) (rot(W[x - 2], 15) ^ rot(W[x - 2], 13) ^ (W[x - 2] >> 10U))
+#define P2(x) (rot(W[x - 15], 25) ^ rot(W[x - 15], 14) ^ (W[x - 15] >> 3U))
 #define P3(x) W[x - 7]
 #define P4(x) W[x - 16]
 
 // SHA round with built in W calc
-#define sharound2(n) { Vals[(131 - n) % 8] += t1W(n); Vals[(135 - n) % 8] = t1W(n) + t2(n); }
+#define sharound2(n) { t1W = t1W(n); Vals[(131 - n) % 8] += t1W; Vals[(135 - n) % 8] = t1W + s0(n) + maj(n); }
 // SHA round without W calc
-#define sharound(n) { t1 = t1(n); Vals[(131 - n) % 8] += t1(n); Vals[(135 - n) % 8] = t1(n) + t2(n); }
+#define sharound(n) { t1 = t1(n); Vals[(131 - n) % 8] += t1; Vals[(135 - n) % 8] = t1 + s0(n) + maj(n); }
 
 // Partial SHA calculations (used for begining and end)
 #define partround(n) { Vals[(135 - n) % 8] = (Vals[(135 - n) % 8] + W[n]); Vals[(131 - n) % 8] += Vals[(135 - n) % 8]; Vals[(135 - n) % 8] += t1; }
@@ -102,6 +94,7 @@ __kernel void search(	const uint state0, const uint state1, const uint state2, c
 	u W[128];
 	u Vals[8];
 	u t1 = T1;
+	u t1W;
 
 	Vals[0] = state0;
 	Vals[1] = B1;
@@ -119,28 +112,34 @@ __kernel void search(	const uint state0, const uint state1, const uint state2, c
 	W[3] = base + get_global_id(0);
 #endif
 	W[4] = 0x80000000U;
+	// P1(x) is 0 for x == 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+	// P2(x) is 0 for x == 20, 21, 22, 23, 24, 25, 26, 27, 28, 29
+	// P3(x) is 0 for x == 12, 13, 14, 15, 16, 17, 18, 19, 20, 21
+	// P4(x) is 0 for x == 21, 22, 23, 24, 25, 26, 27, 28, 29, 30	
 	W[14] = W[13] = W[12] = W[11] = W[10] = W[9] = W[8] = W[7] = W[6] = W[5] = 0x00000000U;
 	W[15] = 0x00000280U;
 	W[16] = W16;
 	W[17] = W17;
-	W[18] = P1(18) + P3(18) + P4(18) + P2(18);
-	W[19] = P1(19) + P2(19) + P3(19) + P4(19);
-	W[20] = P2(20) + P3(20) + P4(20) + P1(20);
+	// removed P3(18) from add because it is == 0
+	W[18] = P4(18) + P1(18) + P2(18);
+	// removed P3(19) from add because it is == 0
+	W[19] = P4(19) + P1(19) + P2(19);
+	// removed P2(20), P3(20) from add because it is == 0
+	W[20] = P4(20) + P1(20);
 	W[21] = P1(21);
 	W[22] = P3(22) + P1(22);
 	W[23] = P3(23) + P1(23);
-	W[24] = P1(24) + P3(24);
-	W[25] = P1(25) + P3(25);
-	W[26] = P1(26) + P3(26);
-	W[27] = P1(27) + P3(27);
-	W[28] = P1(28) + P3(28);
-	W[29] = P1(29) + P3(29);
-	W[30] = P1(30) + P2(30) + P3(30);
-	W[31] = P2(31) + P4(31) + P1(31) + P3(31);
-	W[32] = P2(32) + P4(32) + P1(32) + P3(32);
+	W[24] = P3(24) + P1(24);
+	W[25] = P3(25) + P1(25);
+	W[26] = P3(26) + P1(26);
+	W[27] = P3(27) + P1(27);
+	W[28] = P3(28) + P1(28);
+	W[29] = P3(29) + P1(29);
+	W[30] = P3(30) + P1(30) + P2(30);
 	
 	partround(3);
 	sharound(4);
+	
 	sharound(5);
 	sharound(6);
 	sharound(7);
@@ -167,8 +166,9 @@ __kernel void search(	const uint state0, const uint state1, const uint state2, c
 	sharound(28);
 	sharound(29);
 	sharound(30);
-	sharound(31);
-	sharound(32);
+	sharound2(31);
+	sharound2(32);
+	
 	sharound2(33);
 	sharound2(34);
 	sharound2(35);
@@ -183,36 +183,21 @@ __kernel void search(	const uint state0, const uint state1, const uint state2, c
 	sharound2(44);
 	sharound2(45);
 	sharound2(46);
-	R(47);
-	sharound(47);
-	R(48);
-	sharound(48);
-	R(49);
-	sharound(49);
-	R(50);
-	sharound(50);
-	R(51);
-	sharound(51);
-	R(52);
-	sharound(52);
-	R(53);
-	sharound(53);
-	R(54);
-	sharound(54);
-	R(55);
-	sharound(55);
-	R(56);
-	sharound(56);
-	R(57);
-	sharound(57);
-	R(58);
-	sharound(58);
-	R(59);
-	sharound(59);
-	R(60);
-	sharound(60);
-	R(61);
-	sharound(61);
+	sharound2(47);
+	sharound2(48);
+	sharound2(49);
+	sharound2(50);
+	sharound2(51);
+	sharound2(52);
+	sharound2(53);
+	sharound2(54);
+	sharound2(55);
+	sharound2(56);
+	sharound2(57);
+	sharound2(58);
+	sharound2(59);
+	sharound2(60);
+	sharound2(61);
 	sharound2(62);
 	sharound2(63);
 
@@ -224,8 +209,11 @@ __kernel void search(	const uint state0, const uint state1, const uint state2, c
 	W[69] = state5 + Vals[5];
 	W[70] = state6 + Vals[6];
 	W[71] = state7 + Vals[7];
-
 	W[72] = 0x80000000U;
+	// P1(x) is 0 for x == 75, 76, 77, 78, 79, 80
+	// P2(x) is 0 for x == 88, 89, 90, 91, 92, 93
+	// P3(x) is 0 for x == 80, 81, 82, 83, 84, 85
+	// P4(x) is 0 for x == 89, 90, 91, 92, 93, 94
 	W[78] = W[77] = W[76] = W[75] = W[74] = W[73] = 0x00000000U;
 	W[79] = 0x00000100U;
 
@@ -238,50 +226,57 @@ __kernel void search(	const uint state0, const uint state1, const uint state2, c
 	Vals[6] = H[6];
 	Vals[7] = (u)0xfc08884d + W[64];
 	
-	R(80);
-
 	sharound(65);
 	sharound(66);
-	W[81] = P1(81) + P2(81) + P4(81);
-	W[82] = P1(82) + P2(82) + P4(82);
 	sharound(67);
-	W[83] = P1(83) + P2(83) + P4(83);
 	sharound(68);
-	W[84] = P1(84) + P2(84) + P4(84);
 	sharound(69);
-	W[85] = P1(85) + P2(85) + P4(85);
 	sharound(70);
-	R(86);
 	sharound(71);
 	sharound(72);
-	R(87);
-	W[88] = P1(88) + P3(88) + P4(88);
 	sharound(73);
 	sharound(74);
-	W[89] = P1(89) + P3(89);
-	W[90] = P1(90) + P3(90);
 	sharound(75);
 	sharound(76);
-	W[91] = P1(91) + P3(91);
-	W[92] = P1(92) + P3(92);
 	sharound(77);
 	sharound(78);
 	sharound(79);
+	
+	// removed P1(80), P3(80) from add because it is == 0
+	W[80] = P4(80) + P2(80);
 	sharound(80);
+	W[81] = P4(81) + P1(81) + P2(81);
 	sharound(81);
+	W[82] = P4(82) + P1(82) + P2(82);
 	sharound(82);
+	W[83] = P4(83) + P1(83) + P2(83);
 	sharound(83);
+	W[84] = P4(84) + P1(84) + P2(84);
 	sharound(84);
+	W[85] = P4(85) + P1(85) + P2(85);
 	sharound(85);
-	sharound(86);
-	sharound(87);
+	
+	sharound2(86);
+	sharound2(87);
+	
+	W[88] = P3(88) + P4(88) + P1(88);
 	sharound(88);
+	
+	W[89] = P3(89) + P1(89);
 	sharound(89);
+	W[90] = P3(90) + P1(90);
 	sharound(90);
+	W[91] = P3(91) + P1(91);
 	sharound(91);
+	W[92] = P3(92) + P1(92);
 	sharound(92);
-	sharound2(93);
-	sharound2(94);
+	// removed P2(93), P4(93) from add because it is == 0
+	W[93] = P3(93) + P1(93);
+	sharound(93);
+	// removed P4(94) from add because it is == 0
+	W[94] = P3(94) + P1(94) + P2(94);
+	sharound(94);
+	
 	sharound2(95);
 	sharound2(96);
 	sharound2(97);
@@ -301,26 +296,19 @@ __kernel void search(	const uint state0, const uint state1, const uint state2, c
 	sharound2(111);
 	sharound2(112);
 	sharound2(113);
-	R(114);
-	sharound(114);
-	R(115);
-	sharound(115);
-	R(116);
-	sharound(116);
-	R(117);
-	sharound(117);
-	R(118);
-	sharound(118);
-	R(119);
-	sharound(119);
+	sharound2(114);
+	sharound2(115);
+	sharound2(116);
+	sharound2(117);
+	sharound2(118);
+	sharound2(119);
 	sharound2(120);
 	sharound2(121);
 	sharound2(122);
 	sharound2(123);
-
 	// Faster to write it this way...
-	Vals[3] += K[60] + s1(124) + ch(124);
-	R(124);
+	Vals[3] += K[60] + ch(124) + s1(124);
+	W(124);
 	partround(124);
 
 #ifdef VECTORS
