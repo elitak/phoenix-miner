@@ -40,7 +40,7 @@ class Miner(object):
         self.connection = None
         self.kernel = None
         self.queue = None
-        self.idle = False
+        self.idle = True
         
         self.cores = []
         self.lastMetaRate = 0.0
@@ -115,13 +115,22 @@ class Miner(object):
         #if idle status has changed force an update
         if self.idle != idle:
             if idle:
+                self.idle = idle
+                self.logger.log("Warning: work queue empty, miner is idle")
                 self.logger.reportRate(0, True)
                 self.connection.setMeta('rate', 0)
                 self.lastMetaRate = time()
+                self.idleFixer()
             else:
+                self.idle = idle
                 self.logger.updateStatus(True)
-        
-        self.idle = idle
+
+    #since i can't find the actual cause of the idle bug im going to add a simple 
+    #workaround that spams work requests every 15 seconds while idle.
+    def idleFixer(self):
+        if self.idle:
+            self.connection.requestWork()
+            reactor.callLater(15, self.idleFixer)
     
     def updateAverage(self):
         #Query all mining cores for their Khash/sec rate and sum.
