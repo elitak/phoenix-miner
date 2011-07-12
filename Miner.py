@@ -28,7 +28,7 @@ from minerutil.MMPProtocol import MMPClient
 from KernelInterface import KernelInterface
 
 class Miner(object):
-    """The main managing class for the miner itself."""
+    #The main managing class for the miner itself.
     
     # This gets updated automatically by SVN.
     REVISION = int('$Rev$'[6:-2])
@@ -64,9 +64,13 @@ class Miner(object):
         self.logger.reportType('RPC' + (' (+LP)' if lp else ''))
     def onPush(self, ignored):
         self.logger.log('LP: New work pushed')
-
+    def onLog(self, message):
+        self.logger.log(message)
+    def onDebug(self, message):
+        self.logger.reportDebug(message)
+    
     def start(self, options):
-        """Configures the Miner via the options specified and begins mining."""
+        #Configures the Miner via the options specified and begins mining.
         
         self.options = options
         
@@ -92,9 +96,9 @@ class Miner(object):
         reactor.addSystemEventTrigger('before', 'shutdown', self.kernel.stop)
     
     def applyMeta(self):
-        """Applies any static metafields to the connection, such as version,
-        kernel, hardware, etc.
-        """
+        #Applies any static metafields to the connection, such as version,
+        #kernel, hardware, etc.
+
         
         # It's important to note here that the name is already put in place by
         # the Options's makeConnection function, since the Options knows the
@@ -105,8 +109,8 @@ class Miner(object):
         system = platform.system() + ' ' + platform.version()
         self.connection.setMeta('os', system)
     
+    #called by CoreInterface to add cores for total hashrate calculation
     def _addCore(self, core):
-        """Temporary function. Practically already deprecated."""
         self.cores.append(core)
     
     #used by WorkQueue to report when the miner is idle
