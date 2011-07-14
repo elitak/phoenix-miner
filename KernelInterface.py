@@ -170,17 +170,6 @@ class KernelInterface(object):
         if callback in self.miner.queue.staleCallbacks:
             self.miner.queue.staleCallbacks.remove(callback)
     
-    def updateRate(self, rate):
-        """Used by kernels to declare their hashrate.
-        
-        DEPRECATED. Use CoreInterface instead and updateRate on that.
-        """
-        
-        if not self._core:
-            self._core = self.addCore()
-        
-        self._core.updateRate(rate)
-    
     def addCore(self):
         """Return a CoreInterface for a new core."""
         return CoreInterface(self)

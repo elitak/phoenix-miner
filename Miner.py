@@ -19,11 +19,9 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-from time import time
 import platform
-
+from time import time
 from twisted.internet import reactor
-
 from minerutil.MMPProtocol import MMPClient
 from KernelInterface import KernelInterface
 
@@ -129,8 +127,7 @@ class Miner(object):
                 self.idle = idle
                 self.logger.updateStatus(True)
 
-    #since i can't find the actual cause of the idle bug im going to add a simple 
-    #workaround that spams work requests every 15 seconds while idle.
+    #request work from the protocol every 15 seconds while idle
     def idleFixer(self):
         if self.idle:
             self.connection.requestWork()

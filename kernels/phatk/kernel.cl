@@ -1,7 +1,7 @@
 // This file is taken and modified from the public-domain poclbm project, and
 // we have therefore decided to keep it public-domain in Phoenix.
 
-// 2011-07-06: further modified by Diapolo and still public-domain
+// 2011-07-11: further modified by Diapolo and still public-domain
 
 #ifdef VECTORS
 	typedef uint2 u;
@@ -20,12 +20,13 @@ __constant uint K[64] = {
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
 };
 
-// H[6] = 0xfc08884d == 0x08909ae5U + 0xb0edbdd0 + K[0]
+// H[6] =  0x08909ae5U + 0xb0edbdd0 + K[0] == 0xfc08884d
+// H[7] = -0x5be0cd19 - (0x90befffa) K[60] == -0xec9fcd13
 __constant uint H[8] = { 
-	0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0xfc08884d, 0x5be0cd19
+	0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0xfc08884d, 0xec9fcd13
 };
 
-// L = 0x198c7e2a2 == 0xa54ff53a + 0xb0edbdd0 + K[0]
+// L = 0xa54ff53a + 0xb0edbdd0 + K[0] == 0x198c7e2a2
 __constant ulong L = 0x198c7e2a2;
 
 #ifdef BITALIGN
@@ -35,31 +36,14 @@ __constant ulong L = 0x198c7e2a2;
 	#define rot(x, y) rotate(x, (u)y)
 #endif
 
-// This part is not from the stock poclbm kernel. It's part of an optimization
-// added in the Phoenix Miner.
-
-// Some AMD devices have the BFI_INT opcode, which behaves exactly like the
-// SHA-256 Ch function, but provides it in exactly one instruction. If
-// detected, use it for Ch. Otherwise, construct Ch out of simpler logical
-// primitives.
-
 #ifdef BFI_INT
-	// Well, slight problem... It turns out BFI_INT isn't actually exposed to
-	// OpenCL (or CAL IL for that matter) in any way. However, there is 
-	// a similar instruction, BYTE_ALIGN_INT, which is exposed to OpenCL via
-	// amd_bytealign, takes the same inputs, and provides the same output. 
-	// We can use that as a placeholder for BFI_INT and have the application 
-	// patch it after compilation.
-	
-	// This is the BFI_INT function
 	#define Ch(x, y, z) amd_bytealign(x, y, z)
-	// Ma can also be implemented in terms of BFI_INT...
-	#define Ma(x, y, z) amd_bytealign((z ^ x), y, x)
 #else 
-	#define Ch(x, y, z) (z ^ (x & (y ^ z)))
-	#define Ma(x, y, z) Ch((z ^ x), y, x)
-//	#define Ma(x, y, z) ((x & z) | (y & (x | z)))
+	#define Ch(x, y, z) bitselect(z, y, x)
 #endif
+
+// Ma now uses the Ch function, if BFI_INT is enabled, the optimized Ch version is used
+#define Ma(x, y, z) Ch((z ^ x), y, x)
 
 // Various intermediate calculations for each SHA round
 #define s0(n) (rot(Vals[(128 - n) % 8], 30) ^ rot(Vals[(128 - n) % 8], 19) ^ rot(Vals[(128 - n) % 8], 10))
@@ -90,60 +74,64 @@ __kernel void search(	const uint state0, const uint state1, const uint state2, c
 						const uint PreVal4, const uint T1,
 						__global uint * output)
 {
-	u W[128];
+	u W[124];
 	u Vals[8];
 
-	Vals[0] = state0;
 	Vals[1] = B1;
 	Vals[2] = C1;
-	Vals[3] = D1;
-	Vals[4] = PreVal4;
 	Vals[5] = F1;
 	Vals[6] = G1;
-	Vals[7] = H1;
-
+	
 	W[2] = W2;
-#ifdef VECTORS 
-	W[3] = ((base + get_global_id(0)) << 1) + (uint2)(0, 1);
+#ifdef VECTORS
+        Vals[4] = (W[3] = ((base + get_global_id(0)) << 1) + (uint2)(0, 1)) + PreVal4;
 #else
-	W[3] = base + get_global_id(0);
+        Vals[4] = (W[3] = base + get_global_id(0)) + PreVal4;
 #endif
 	// used in: P2(19) == 285220864 (0x11002000), P4(20)
 	W[4] = 0x80000000U;
 	// P1(x) is 0 for x == 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
 	// P2(x) is 0 for x == 20, 21, 22, 23, 24, 25, 26, 27, 28, 29
 	// P3(x) is 0 for x == 12, 13, 14, 15, 16, 17, 18, 19, 20, 21
-	// P4(x) is 0 for x == 21, 22, 23, 24, 25, 26, 27, 28, 29, 30	
+	// P4(x) is 0 for x == 21, 22, 23, 24, 25, 26, 27, 28, 29, 30
+	// W[x] in sharound(x) is 0 for x == 5, 6, 7, 8, 9, 10, 11, 12, 13, 14
 	W[14] = W[13] = W[12] = W[11] = W[10] = W[9] = W[8] = W[7] = W[6] = W[5] = 0x00000000U;
 	// used in: P2(30) == 10485845 (0xA00055), P3(22), P4(31)
+	// K[15] + W[15] == 0xc19bf174 + 0x00000280U = 0xc19bf3f4
 	W[15] = 0x00000280U;
 
 	W[16] = W16;
 	W[17] = W17;
 	// removed P3(18) from add because it is == 0
-	W[18] = P4(18) + P2(18) + P1(18);
+	W[18] = P1(18) + P4(18) + P2(18);
 	// removed P3(19) from add because it is == 0
-	W[19] = P4(19) + 0x11002000 + P1(19);
+	W[19] = (u)0x11002000 + P1(19) + P4(19);
 	// removed P2(20), P3(20) from add because it is == 0
-	W[20] = P4(20) + P1(20);
+	W[20] = P1(20) + P4(20);
 	W[21] = P1(21);
-	W[22] = P3(22) + P1(22);
-	W[23] = P3(23) + P1(23);
-	W[24] = P3(24) + P1(24);
-	W[25] = P3(25) + P1(25);
-	W[26] = P3(26) + P1(26);
-	W[27] = P3(27) + P1(27);
-	W[28] = P3(28) + P1(28);
-	W[29] = P3(29) + P1(29);
-	W[30] = P3(30) + 0xA00055 + P1(30);
+	W[22] = P1(22) + P3(22);
+	W[23] = P1(23) + P3(23);
+	W[24] = P1(24) + P3(24);
+	W[25] = P1(25) + P3(25);
+	W[26] = P1(26) + P3(26);
+	W[27] = P1(27) + P3(27);
+	W[28] = P1(28) + P3(28);
+	W[29] = P1(29) + P3(29);
+	W[30] = (u)0xA00055 + P1(30) + P3(30);
 	
-	// saved: 1 write to t1 (initialisation)
-	Vals[4] += W[3];
-	Vals[0] += Vals[4];
+	// Round 3
+	Vals[0] = state0 + Vals[4];
 	Vals[4] += T1;
 	
-	sharound(4);
-	sharound(5);
+	// Round 4
+	// K[4] + W[4] == 0x3956c25b + 0x80000000U = 0xb956c25b
+	Vals[7] = (Vals[3] = (u)0xb956c25b + D1 + s1(4) + ch(4)) + H1;
+	Vals[3] += s0(4) + ma(4);
+
+	// Round 5
+	Vals[2] = K[5] + C1 + s1(5) + ch(5) + s0(5) + ma(5);
+	Vals[6] = K[5] + C1 + G1 + s1(5) + ch(5);
+
 	sharound(6);
 	sharound(7);
 	sharound(8);
@@ -246,19 +234,22 @@ __kernel void search(	const uint state0, const uint state1, const uint state2, c
 	W[70] = state6 + Vals[6];
 	W[71] = state7 + Vals[7];
 	// used in: P2(87) = 285220864 (0x11002000), P4(88)
+	// K[72] + W[72] ==
 	W[72] = 0x80000000U;
 	// P1(x) is 0 for x == 75, 76, 77, 78, 79, 80
 	// P2(x) is 0 for x == 88, 89, 90, 91, 92, 93
 	// P3(x) is 0 for x == 80, 81, 82, 83, 84, 85
 	// P4(x) is 0 for x == 89, 90, 91, 92, 93, 94
+	// W[x] in sharound(x) is 0 for x == 73, 74, 75, 76, 77, 78
 	W[78] = W[77] = W[76] = W[75] = W[74] = W[73] = 0x00000000U;
 	// used in: P1(81) = 10485760 (0xA00000), P2(94) = 4194338 (0x400022), P3(86), P4(95)
+	// K[79] + W[79] ==
 	W[79] = 0x00000100U;
 
 	Vals[0] = H[0];
 	Vals[1] = H[1];
 	Vals[2] = H[2];
-	Vals[3] = L + W[64];
+	Vals[3] = (u)L + W[64];
 	Vals[4] = H[3];
 	Vals[5] = H[4];
 	Vals[6] = H[5];
@@ -281,24 +272,24 @@ __kernel void search(	const uint state0, const uint state1, const uint state2, c
 	sharound(79);
 	
 	// removed P1(80), P3(80) from add because it is == 0
-	W[80] = P4(80) + P2(80);
-	sharound(80);
-	W[81] = P4(81) + P2(81) + 0xA00000;
-	sharound(81);
+	W[80] = P2(80) + P4(80);
+	W[81] = (u)0xA00000 + P4(81) + P2(81);
 	W[82] = P4(82) + P2(82) + P1(82);
-	sharound(82);
 	W[83] = P4(83) + P2(83) + P1(83);
-	sharound(83);
 	W[84] = P4(84) + P2(84) + P1(84);
-	sharound(84);
 	W[85] = P4(85) + P2(85) + P1(85);
-	sharound(85);
-	
 	W(86);
+
+	sharound(80);
+	sharound(81);	
+	sharound(82);
+	sharound(83);
+	sharound(84);
+	sharound(85);
 	sharound(86);
-	W[87] = P4(87) + P3(87) + 0x11002000 + P1(87);
+
+	W[87] = (u)0x11002000 + P4(87) + P3(87) + P1(87);
 	sharound(87);
-	
 	W[88] = P4(88) + P3(88) + P1(88);
 	sharound(88);
 	W[89] = P3(89) + P1(89);
@@ -313,7 +304,7 @@ __kernel void search(	const uint state0, const uint state1, const uint state2, c
 	W[93] = P3(93) + P1(93);
 	sharound(93);
 	// removed P4(94) from add because it is == 0
-	W[94] = P3(94) + 0x400022 + P1(94);
+	W[94] = (u)0x400022 + P3(94) + P1(94);
 	sharound(94);
 	
 	W(95);
@@ -375,11 +366,8 @@ __kernel void search(	const uint state0, const uint state1, const uint state2, c
 	W(123);
 	sharound(123);
 
-	// Faster to write it this way...
-	// saved: 1 write to W[124]
-	// saved: 1 write to Vals[3]
-	// saved: 1 add Vals[3] + t1
-	Vals[7] += K[60] + Vals[3] + P4(124) + P3(124) + P2(124) + P1(124) + s1(124) + ch(124);
+	// Round 124
+	Vals[7] += Vals[3] + P4(124) + P3(124) + P2(124) + P1(124) + s1(124) + ch(124);
 	
 #ifdef VECTORS
 	if(Vals[7].x == -H[7])
