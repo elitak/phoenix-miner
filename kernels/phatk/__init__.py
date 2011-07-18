@@ -72,32 +72,50 @@ class KernelData(object):
             list(self.state2)[3:] + list(self.state2)[:3], dtype=np.uint32)
         self.nr = nonceRange
         
-        self.f = np.zeros(5, np.uint32)
+		# added place for another variable
+        self.f = np.zeros(6, np.uint32)
         self.calculateF(data)
+
+		# D1 == old D1 + (K[4] + W[4])
+        self.state2[3] = np.uint32(self.state2[3] + 0xb956c25b)
     
     def calculateF(self, data):
         rot = lambda x,y: x>>y | x<<(32-y)
-        #W2
-        self.f[0] = np.uint32(data[2])
 
-        #W16
+        # W16
         self.f[1] = np.uint32(data[0] + (rot(data[1], 7) ^ rot(data[1], 18) ^
             (data[1] >> 3)))
-        #W17
+        # W17
         self.f[2] = np.uint32(data[1] + (rot(data[2], 7) ^ rot(data[2], 18) ^
             (data[2] >> 3)) + 0x01100000)
 
+        # W2 == old W2 + P1() with W16
+        self.f[0] = np.uint32(data[2] + (
+                rot(self.f[1], 32-13) ^
+                rot(self.f[1], 32-15) ^
+                (self.f[1] >> 10)
+                ))
+
+        # W17_2 == P2(19) + P1() with W17
+        self.f[5] = np.uint32(0x11002000+(
+		rot(self.f[2], 32-13) ^ 
+		rot(self.f[2], 32-15) ^ 
+	        (self.f[2] >> 10)
+		))
+
         #2 parts of the first SHA round
-        self.f[3] = np.uint32(self.state[4] + (rot(self.state2[1], 6) ^
-            rot(self.state2[1], 11) ^ rot(self.state2[1], 25)) +
-            (self.state2[3] ^ (self.state2[1] & (self.state2[2] ^
-            self.state2[3]))) + 0xe9b5dba5)
+        # T1
         self.f[4] = np.uint32((rot(self.state2[5], 2) ^
             rot(self.state2[5], 13) ^ rot(self.state2[5], 22)) +
             ((self.state2[5] & self.state2[6]) | (self.state2[7] &
             (self.state2[5] | self.state2[6]))))
-        
-        
+
+		# Preval4
+        self.f[3] = np.uint32(self.state[4] + (rot(self.state2[1], 6) ^
+            rot(self.state2[1], 11) ^ rot(self.state2[1], 25)) +
+            (self.state2[3] ^ (self.state2[1] & (self.state2[2] ^
+            self.state2[3]))) + 0xe9b5dba5)
+
 class MiningKernel(object):
     """A Phoenix Miner-compatible kernel that uses the poclbm OpenCL kernel."""
     
@@ -378,29 +396,33 @@ class MiningKernel(object):
     def mineThread(self):
         for data in self.qr:
             for i in range(data.iterations):
-                self.kernel.search(
+				# added C1 + K[5]
+				# added W17_2
+				# modified Preval4 = Preval4 + T1
+				# modified T1 = T1 - state0
+   				self.kernel.search(
                     self.commandQueue, (data.size, ), (self.WORKSIZE, ),
                     data.state[0], data.state[1], data.state[2], data.state[3],
                     data.state[4], data.state[5], data.state[6], data.state[7],
-                    data.state2[1], data.state2[2], data.state2[3],
+                    data.state2[1], data.state2[2], np.uint32(data.state2[2] + 0x59f111f1), data.state2[3],
                     data.state2[5], data.state2[6], data.state2[7],
                     data.base[i],
                     data.f[0],
-                    data.f[1],data.f[2],
-                    data.f[3],data.f[4],
+                    data.f[1],data.f[2], data.f[5],
+                    (data.f[3] + data.f[4]), (data.state[0] - data.f[4]),
                     self.output_buf)
-                cl.enqueue_read_buffer(
+   				cl.enqueue_read_buffer(
                     self.commandQueue, self.output_buf, self.output)
-                self.commandQueue.finish()
+   				self.commandQueue.finish()
                 
                 # The OpenCL code will flag the last item in the output buffer when
                 # it finds a valid nonce. If that's the case, send it to the main
                 # thread for postprocessing and clean the buffer for the next pass.
-                if self.output[self.OUTPUT_SIZE]:
-                    reactor.callFromThread(self.postprocess, self.output.copy(),
+   				if self.output[self.OUTPUT_SIZE]:
+   					reactor.callFromThread(self.postprocess, self.output.copy(),
                     data.nr)
             
-                    self.output.fill(0)
-                    cl.enqueue_write_buffer(
+   					self.output.fill(0)
+   					cl.enqueue_write_buffer(
                         self.commandQueue, self.output_buf, self.output)
  
