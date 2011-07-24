@@ -64,6 +64,7 @@ class RPCClient(ClientBase):
     
     def __init__(self, handler, url):
         self.handler = handler
+        self.url = url
         self.params = {}
         for param in url.params.split('&'):
             s = param.split('=',1)
@@ -206,7 +207,7 @@ class RPCClient(ClientBase):
         
         try:
             self.postdata['params'] = [data] if data else []
-            (connection, result) = self.request(connection, '/', self.headers, dumps(self.postdata))
+            (connection, result) = self.request(connection, self.url.path, self.headers, dumps(self.postdata))
             
             reactor.callFromThread(self.setConnected, True)
             return result['result']
