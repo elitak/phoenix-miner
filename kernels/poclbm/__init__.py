@@ -361,10 +361,10 @@ class MiningKernel(object):
         return kd
     
     def postprocess(self, output, nr):
-        """Scans over a single buffer produced as a result of running the
-        OpenCL kernel on the device. This is done outside of the mining thread
-        for efficiency reasons.
-        """
+        # Scans over a single buffer produced as a result of running the
+        # OpenCL kernel on the device. This is done outside of the mining thread
+        # for efficiency reasons.
+        
         # Iterate over only the first OUTPUT_SIZE items. Exclude the last item
         # which is a duplicate of the most recently-found nonce.
         for i in xrange(self.OUTPUT_SIZE):
