@@ -19,178 +19,325 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 # THE SOFTWARE.
 
-import socket
-import httplib
-import Miner
-import traceback
-
-from base64 import b64encode
-from json import dumps, loads
-from twisted.internet import defer, reactor, threads
-from collections import deque
-from time import sleep
-from urlparse import urlsplit
-from threading import Thread
+import urlparse
+import json
+import sys
+from zope.interface import implements
+from twisted.web.iweb import IBodyProducer
+from client3420 import Agent, ResponseDone
+from _newclient3420 import ResponseFailed
+from twisted.web.http import PotentialDataLoss
+from twisted.web.http_headers import Headers
+from twisted.internet import defer, reactor, protocol, error
+from twisted.internet.protocol import Protocol
+from twisted.python import failure
 
 from ClientBase import ClientBase, AssignedWork
 
-#constants
-USER_AGENT = 'phoenix/' + Miner.Miner.VERSION
+class StringBodyProducer(object):
+    """Something Twisted itself needs..."""
+    implements(IBodyProducer)
+    
+    def __init__(self, body):
+        self.body = body
+        self.length = len(self.body)
+    def startProducing(self, consumer):
+        consumer.write(self.body)
+        return defer.succeed(None)
+    def pauseProducing(self):
+        pass
+    def stopProducing(self):
+        pass
 
-MAX_REDIRECTS = 3
+class BodyLoader(Protocol):
+    """Loads an HTTP body and fires it, as a string, through a Deferred."""    
+    def __init__(self, d):
+        self.d = d
+        self.data = ''
+    def dataReceived(self, bytes):
+        self.data += bytes
+    def connectionLost(self, reason):
+        if not reason.check(ResponseDone, PotentialDataLoss):
+            self.d.errback(failure.Failure(reason))
+        else:
+            self.d.callback(self.data)
 
-LONG_POLL_TIMEOUT = 3600
-
-TIMEOUT = 10
-
-
-# Socket wrapper to enable socket.TCP_NODELAY and KEEPALIVE
-realsocket = socket.socket
-def socketwrap(family=socket.AF_INET, type=socket.SOCK_STREAM, proto=0):
-    sockobj = realsocket(family, type, proto)
-    sockobj.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    sockobj.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-    return sockobj
-socket.socket = socketwrap
-
-#exceptions
 class ServerMessage(Exception): pass
-class NotAuthorized(Exception): pass
+        
+class RPCPoller(object):
+    """Polls the root's chosen bitcoind or pool RPC server for work."""
+    
+    def __init__(self, root):
+        self.root = root
+        self.agent = Agent(reactor, persistent=True)
+        self.askInterval = None
+        self.askCall = None
+        self.currentlyAsking = False
+    
+    def setInterval(self, interval):
+        """Change the interval at which to poll the getwork() function."""
+        self.askInterval = interval
+        self._startCall()
+    
+    def _startCall(self):
+        self._stopCall()
+        if self.askInterval:
+            self.askCall = reactor.callLater(self.askInterval, self.ask)
+        else:
+            self.askCall = None
+    
+    def _stopCall(self):
+        if self.askCall:
+            try:
+                self.askCall.cancel()
+            except (error.AlreadyCancelled, error.AlreadyCalled):
+                pass
+            except:
+                pass
+            self.askCall = None
+    
 
-#This RPCClient is based on the RPC implementation in poclbm, but it has been
-#modified to work within the Phoenix framework and make use of deferreds
+    def ask(self):
+        """Run a getwork request immediately."""
+        
+        if self.currentlyAsking:
+            return
+        self.currentlyAsking = True
+        self._stopCall()
+        
+        d = self.call('getwork')
+        
+        def errback(failure):
+            if not self.currentlyAsking:
+                return
+            self.currentlyAsking = False
+            if failure.check(ServerMessage):
+                self.root.runCallback('msg', failure.getErrorMessage())
+            
+            self.root._failure()
+            self._startCall()
+        def errback_delay(x): reactor.callLater(0, errback, x)
+        d.addErrback(errback_delay)
+        
+        def callback(x):
+            if not self.currentlyAsking:
+                return
+            self.currentlyAsking = False
+            try:
+                (headers, result) = x
+            except TypeError:
+                return
+            self.root.handleWork(result)
+            self.root.handleHeaders(headers)
+            self._startCall()
+        # Minor bug in the #3420 patch; you can't start new requests during
+        # callbacks from old ones, so this function has the reactor call it a
+        # little bit later (with no artificial delay)
+        def callback_delay(x): reactor.callLater(0, callback, x)
+        d.addCallback(callback_delay)
+    
+    @defer.inlineCallbacks
+    def call(self, method, params=[]):
+        """Call the specified remote function."""
+        
+        body = json.dumps({'method': method, 'params': params, 'id': 1})
+        response = yield self.agent.request('POST',
+            self.root.url,
+            Headers({
+                'Authorization': [self.root.auth],
+                'User-Agent': [self.root.version],
+                'Content-Type': ['application/json']
+            }), StringBodyProducer(body))
+        
+        d = defer.Deferred()
+        response.deliverBody(BodyLoader(d))
+        data = yield d
+        result = self.parse(data)
+
+        defer.returnValue((response.headers, result))
+    
+    @classmethod
+    def parse(cls, data):
+        """Attempt to load JSON-RPC data."""
+        
+        response = json.loads(data)
+        try:
+            message = response['error']['message']
+        except (KeyError, TypeError):
+            pass
+        else:
+            raise ServerMessage(message)
+        
+        return response.get('result')
+    
+class LongPoller(object):
+    """Polls a long poll URL, reporting any parsed work results to the
+    callback function.
+    """
+    
+    def __init__(self, url, root):
+        self.url = url
+        self.root = root
+        #NOTE: setting long poll connections to not be persistent
+        #This is to correct stability/memory leak issues
+        self.agent = Agent(reactor, persistent=False)
+        self.polling = False
+    
+    def start(self):
+        """Begin requesting data from the LP server, if we aren't already..."""
+        if self.polling:
+            return
+        self.polling = True
+        self._request()
+        
+    def _request(self):
+        if self.polling:
+            d = self.agent.request('GET', self.url,
+                Headers({
+                    'Authorization': [self.root.auth],
+                    'User-Agent': [self.root.version]
+                }))
+            d.addBoth(self._requestComplete)
+    
+    def stop(self):
+        """Stop polling. This LongPoller probably shouldn't be reused."""
+        self.polling = False
+    
+    @defer.inlineCallbacks
+    def _requestComplete(self, response):
+        if not self.polling:
+            return
+        
+        if isinstance(response, failure.Failure):
+            self._request()
+            return
+        
+        d = defer.Deferred()
+        response.deliverBody(BodyLoader(d))
+        try:
+            data = yield d
+        except ResponseFailed:
+            self._request()
+            return
+        
+        try:
+            result = RPCPoller.parse(data)
+        except ValueError:
+            self._request()
+            return
+        except ServerMessage:
+            exctype, value = sys.exc_info()[:2]
+            self.root.runCallback('msg', str(value))
+            self._request()
+            return
+        
+        self._request()
+        self.root.handleWork(result, True)
+
 class RPCClient(ClientBase):
-    #The actual root of the whole RPC client system.
+    """The actual root of the whole RPC client system."""
     
     def __init__(self, handler, url):
         self.handler = handler
+        self.url = '%s://%s:%d%s' % (url.scheme, url.hostname,
+                                     url.port or 80, url.path)
         self.params = {}
         for param in url.params.split('&'):
             s = param.split('=',1)
             if len(s) == 2:
                 self.params[s[0]] = s[1]
-        try:
-           self.askrate = int(self.params['askrate'])
-        except (KeyError, ValueError):
-           self.askrate = None
-        self.connected = False
+        self.auth = 'Basic ' + ('%s:%s' % (
+            url.username, url.password)).encode('base64').strip()
         self.version = 'RPCClient/1.6'
-        self.host = str(url.hostname) + ':' + str(url.port)
-        self.postdata = {"method": 'getwork', 'id': 'json'}
-        self.headers = {"User-Agent": USER_AGENT, "Authorization": 'Basic ' + b64encode('%s:%s' % (url.username, url.password)), "Content-Type": 'application/json'}
-        self.getConnection = None
-        self.sendConnection = None
-        self.longPollURL = None
-        self.deferredQueue = deque()
-        self.getWaiting = False
-        self.sending = False
-        self.getting = False
-        self.block = ''
-        self.disconnected = False
     
-    #thread safe log callback
-    def log(self, message):
-        reactor.callFromThread(self.runCallback, 'log', message)
+        self.poller = RPCPoller(self)
+        self.longPoller = None # Gets created later...
         
-    #thread safe debug callback
-    def debug(self, message):
-        reactor.callFromThread(self.runCallback, 'debug', message)
-        
-    #thread safe MSG callback
-    def msg(self, message):
-        reactor.callFromThread(self.runCallback, 'debug', message)
-        
-    #connects to the server by requesting work
+        self.saidConnected = False
+        self.block = None
+    
     def connect(self):
-        self.requestWork()
-        LPThread = Thread(target=self.longPollThread)
-        LPThread.daemon = True
-        LPThread.start()
+        """Begin communicating with the server..."""
+        
+        self.poller.ask()
     
-    #disconnect and do not attempt to reconnect
     def disconnect(self):
-        self.disconnected = True
-        self.deferredQueue.clear()
-        self.LPThread = None
+        """Cease server communications immediately. The client might be
+        reusable, but it's probably best not to try.
+        """
+        
+        self._deactivateCallbacks()
+        
+        self.poller.setInterval(None)
+        if self.longPoller:
+            self.longPoller.stop()
+            self.longPoller = None
     
-    #this needs to be present as part of the Phoenix framework
     def setMeta(self, var, value):
-        #RPC clients do not support meta. Ignore.
-        pass
-    
-    #handles sending connect/disconnect messages to the logger
-    def setConnected(self, connected):
-        if self.connected:
-            if connected != self.connected:
-                self.runCallback('disconnect')
-                self.longPollURL = None
-        else:
-            if connected != self.connected:
-                self.runCallback('connect')                
-                
-        self.connected = connected
-    
+        """RPC clients do not support meta. Ignore."""
+
     def setVersion(self, shortname, longname=None, version=None, author=None):
         if version is not None:
             self.version = '%s/%s' % (shortname, version)
         else:
             self.version = shortname
     
-    #This is called to asyncronously request more work from the protocol
-    #When work is recieved, it will be added to WorkQueue
     def requestWork(self):
+        """Application needs work right now. Ask immediately."""
+        self.poller.ask()
     
-        if self.getting:
-            #set a flag to ensure more work is requested after the current
-            #request finishes
-            self.getWaiting = True
-        else:
-            #set getting flag to prevent multiple getworks at a time
-            self.getting = True
+    def sendResult(self, result):
+        """Sends a result to the server, returning a Deferred that fires with
+        a bool to indicate whether or not the work was accepted.
+        """
+        
+        # Must be a 128-byte response, but the last 48 are typically ignored.
+        result += '\x00'*48
+        
+        d = self.poller.call('getwork', [result.encode('hex')])
+        
+        def errback(*ignored):
+            return False # ANY error while turning in work is a Bad Thing(TM).
             
-            #set up the connection if it's not already
-            if not self.getConnection:
-                self.getConnection = httplib.HTTPConnection(self.host, strict=True, timeout=TIMEOUT)
-                
-            def callback(x):
-                
-                #process recieved work and add to WorkQueue
-                self.handleWork(x)
-                
-                #if more work was requested then start another getwork
-                if self.getWaiting:
-                    self.getting = False
-                    self.getWaiting = False
-                    self.requestWork()
-                else:
-                    #otherwise set getting to false
-                    self.getting = False
-                    
-                    #handle askrate if set
-                    if self.askrate is not None:
-                        reactor.callLater(self.askrate, self.requestWork)
-                        
-            def errback(x):
-                
-                #report error as debug
-                self.runCallback('debug', 'Error getting work: ' + str(x))
-                
-                #since we are not imediately requesting more work, set getting
-                #to false in case another request is sent
-                self.getting = False
-                
-                #since we failed to get work try again in 15 seconds
-                reactor.callLater(15, self.requestWork)
-            
-            d = threads.deferToThread(self.getwork, self.getConnection)
-            d.addErrback(errback)
-            d.addCallback(callback)
-            return d
+        #we need to return the result, not the headers
+        def callback(x):
+            try:
+                (headers, accepted) = x
+            except TypeError:
+                return False
+            return accepted
+        
+        d.addErrback(errback)
+        d.addCallback(callback)
+        return d
     
-    #handles work returned by getwork()
+    def useAskrate(self, variable):
+        defaults = {'askrate': 10, 'retryrate': 15, 'lpaskrate': 0}
+        try:
+            askrate = int(self.params[variable])
+        except (KeyError, ValueError):
+            askrate = defaults.get(variable, 10)
+        self.poller.setInterval(askrate)
+    
     def handleWork(self, work, pushed=False):
+        
         if work is None:
             return;
+        
+        if not self.saidConnected:
+            self.saidConnected = True
+            self.runCallback('connect')
+            self.useAskrate('askrate')
+        
+        if 'block' in work:
+            try:
+                block = int(work['block'])
+            except (TypeError, ValueError):
+                pass
+            else:
+                if self.block != block:
+                    self.block = block
+                    self.runCallback('block', block)
         
         aw = AssignedWork()
         aw.data = work['data'].decode('hex')[:80]
@@ -200,211 +347,48 @@ class RPCClient(ClientBase):
             self.runCallback('push', aw)
         self.runCallback('work', aw)
     
-    #getwork (warning: not called from main thread!)
-    def getwork(self, connection, data=None):
-        if self.disconnected: return
-        
+    def handleHeaders(self, headers):
+        blocknum = headers.getRawHeaders('X-Blocknum') or ['']
         try:
-            self.postdata['params'] = [data] if data else []
-            (connection, result) = self.request(connection, '/', self.headers, dumps(self.postdata))
-            
-            reactor.callFromThread(self.setConnected, True)
-            return result['result']
-        
-        except NotAuthorized:
-            reactor.callFromThread(self.runCallback, 'failure')
-            self.log('Wrong username or password')
-            self.connectionLost()
-        except ServerMessage as message:
-            self.msg(message)
-            self.connectionLost()
-        except (IOError, httplib.HTTPException, ValueError) as e:
-            if self.connected:
-                self.setConnected(False)
-            else:
-                reactor.callFromThread(self.runCallback, 'failure')
-                
-        except:
-            self.debug('Unknown error')
-            self.connectionLost()
-    
-    #request (warning: not called from main thread!)
-    def request(self, connection, url, headers, data=None):
-        result = response = None
-        try:
-            if data: connection.request('POST', url, data, headers)
-            else: connection.request('GET', url, headers=headers)
-            
-            response = connection.getresponse()
-            if response.status == httplib.UNAUTHORIZED: raise NotAuthorized()
-            r = MAX_REDIRECTS
-            while response.status == httplib.TEMPORARY_REDIRECT:
-                response.read()
-                url = response.getheader('Location', '')
-                if r == 0 or url == '': raise HTTPException('Too many redirects or bad redirects')
-                connection.request('GET', url, headers=headers)
-                response = connection.getresponse();
-                r -= 1
-            
-            #Check for server messages
-            result = loads(response.read())
-            if result['error']: raise ServerMessage(result['error']['message'])
-            
-            #handle block number
-            blocknum = response.getheader('X-Blocknum', None)
-            if blocknum is not None:
-                reactor.callFromThread(self.handleBlockNum, blocknum)
-            
-            #Handle long polling
-            longPollURL = response.getheader('X-Long-Polling', None)
-            if longPollURL is not None:
-                self.longPollURL = longPollURL
-            
-            return (connection, result)
-        finally:
-            if not result or not response or (response.version == 10 and response.getheader('connection', '') != 'keep-alive') or response.getheader('connection', '') == 'close':
-                connection.close()
-                connection = None
-    
-    #handles X-Blocknum header and block callback
-    def handleBlockNum(self, blocknum):
-        try:
-            block = int(blocknum)
-        except (TypeError, ValueError): pass
+            block = int(blocknum[0])
+        except ValueError:
+            pass
         else:
             if self.block != block:
                 self.block = block
                 self.runCallback('block', block)
-    
-    def sendResult(self, result):
-        #Sends a result to the server, returning a Deferred that fires with
-        #a bool to indicate whether or not the work was accepted.
         
-        # Must be a 128-byte response, but the last 48 are typically ignored.
-        result += '\x00'*48
+        longpoll = headers.getRawHeaders('X-Long-Polling')
+        if longpoll:
+            lpParsed = urlparse.urlparse(longpoll[0])
+            urlParsed = urlparse.urlparse(self.url)
+            lpURL = '%s://%s:%d%s%s' % (
+                lpParsed.scheme or urlParsed.scheme,
+                lpParsed.hostname or urlParsed.hostname,
+                (lpParsed.port if lpParsed.hostname else urlParsed.port) or 80,
+                lpParsed.path, '?' + lpParsed.query if lpParsed.query else '')
+            if self.longPoller and self.longPoller.url != lpURL:
+                self.longPoller.stop()
+                self.longPoller = None
+            if not self.longPoller:
+                self.longPoller = LongPoller(lpURL, self)
+                self.longPoller.start()
+                self.useAskrate('lpaskrate')
+                self.runCallback('longpoll', True)
+        elif self.longPoller:
+            self.longPoller.stop()
+            self.longPoller = None
+            self.useAskrate('askrate')
+            self.runCallback('longpoll', False)
         
-        #This adds work to the pending pool, if no other work is being sent
-        #it will go through imediately, otherwise it will wait
-        d = self.sendWork(result.encode('hex'))
-        
-        def errback(message):
-            self.runCallback('debug', str(message))
-            return False # ANY error while turning in work is a Bad Thing(TM).
-            
-        #we need to return the result, not the headers
-        def callback(x):
-            try:
-                accepted = x
-            except TypeError:
-                return False
-            return accepted
-        
-        d.addErrback(errback)
-        d.addCallback(callback)
-        return d
-    
-    #used internally only, do not call from other classes
-    def sendWork(self, data):
-        
-        if self.sending:
-            df = defer.Deferred()
-            self.deferredQueue.append((df, data))
-            return df
+    def _failure(self):
+        if self.saidConnected:
+            self.saidConnected = False
+            self.runCallback('disconnect')
         else:
-            
-            def callback(accepted):
-                if len(self.deferredQueue) > 0:
-                    self.continueSend()
-                else:
-                    self.sending = False
-                    
-                return defer.succeed(accepted)
-            
-            def errback(x):
-            
-                self.runCallback('debug', 'Error sending work: ' + str(x))
-                if len(self.deferredQueue) > 0:
-                    self.continueSend()
-                else:
-                    self.sending = False
-                    
-                return defer.succeed(False)
-            
-            if not self.sendConnection:
-                self.sendConnection = httplib.HTTPConnection(self.host, strict=True, timeout=TIMEOUT)
-            
-            self.sending = True
-            d = threads.deferToThread(self.getwork, self.sendConnection, data)
-            d.addCallback(callback)
-            d.addErrback(errback)
-            
-            return d
-    
-    #continues to send work until deferred queue is empty
-    def continueSend(self):
-        
-        def callback(accepted):
-            if len(self.deferredQueue) > 0:
-                self.continueSend()
-            else:
-                self.sending = False
-            
-            return accepted
-            
-        def errback(x):
-            self.runCallback('debug', 'Error sending work: ' + str(x))
-            if len(self.deferredQueue) > 0:
-                self.continueSend()
-            else:
-                self.sending = False
-                
-            return False
-        
-        df, data = self.deferredQueue.popleft()
-        if not self.sendConnection:
-            self.sendConnection = httplib.HTTPConnection(self.host, strict=True, timeout=TIMEOUT)
-        
-        self.sending = True
-        d = threads.deferToThread(self.getwork, self.sendConnection, data)
-        d.addCallback(callback)
-        d.addErrback(errback)
-        d.chainDeferred(df)
-    
-    #long polling thread
-    def longPollThread(self):
-        connection = None
-        last_url = None
-        while not self.disconnected:
-            sleep(1)
-            url = self.longPollURL
-            if url is None:
-                #inform miner that long polling is not active
-                reactor.callFromThread(self.runCallback, 'longpoll', False)
-            else:
-                reactor.callFromThread(self.runCallback, 'longpoll', True)
-                host = self.host
-                parsedUrl = urlsplit(url)
-                if parsedUrl.netloc != '':
-                    host = parsedUrl.netloc
-                    url = url[url.find(host)+len(host):]
-                    if url == '': url = '/'
-                try:
-                    if self.longPollURL != last_url:
-                        self.debug("Using new LP URL " + str(url))
-                        connection = None
-                    if not connection:
-                        self.debug("LP connected to " + str(host))
-                        connection = httplib.HTTPConnection(host, timeout=LONG_POLL_TIMEOUT)
-                        
-                    (connection, result) = self.request(connection, url, self.headers)
-                    reactor.callFromThread(self.handleWork, result['result'])
-                    reactor.callFromThread(self.runCallback, 'push', True)
-                    last_url = self.longPollURL
-                except NotAuthorized:
-                    self.log('Long poll: Wrong username or password')
-                except ServerMessage as e:
-                    self.log('Long poll: ' + str(e))
-                except (IOError, httplib.HTTPException, ValueError):
-                    self.log('Long poll exception:')
-                    traceback.print_exc()
-        
+            self.runCallback('failure')
+        self.useAskrate('retryrate')
+        if self.longPoller:
+            self.longPoller.stop()
+            self.longPoller = None
+            self.runCallback('longpoll', False)

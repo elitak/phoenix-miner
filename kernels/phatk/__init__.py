@@ -132,7 +132,7 @@ class MiningKernel(object):
         'FASTLOOP', bool, default=True, advanced=True,
         help='Run iterative mining thread?')
     AGGRESSION = KernelOption(
-        'AGGRESSION', int, default=4, advanced=True,
+        'AGGRESSION', int, default=5, advanced=True,
         help='Exponential factor indicating how much work to run '
         'per OpenCL execution')
     WORKSIZE = KernelOption(
@@ -339,8 +339,6 @@ class MiningKernel(object):
             #if the worksize is not a power of 2, round down to the nearest one
             if (self.WORKSIZE & (self.WORKSIZE - 1)) != 0:   
                 self.WORKSIZE = 1 << int(math.floor(math.log(X)/math.log(2)))
-            
-        self.interface.setWorkFactor(self.WORKSIZE)
         
     def start(self):
         """Phoenix wants the kernel to start."""

@@ -35,9 +35,7 @@ class KernelOption(object):
     
     def __init__(self, name, type, help=None, default=REQUIRED,
         advanced=False, **kwargs):
-        
         self.localValues = {}
-        
         self.name = name
         self.type = type
         self.help = help
@@ -64,7 +62,6 @@ class CoreInterface(object):
     def __init__(self, kernelInterface):
         self.kernelInterface = kernelInterface
         self.averageSamples = []
-        
         self.kernelInterface.miner._addCore(self)
     
     def updateRate(self, rate):
@@ -95,9 +92,7 @@ class KernelInterface(object):
     
     def __init__(self, miner):
         self.miner = miner
-        
         self._core = None
-        self.workFactor = 1
         
     def _getOption(self, name, type, default):
         """KernelOption uses this to read the actual value of the option."""
@@ -127,31 +122,23 @@ class KernelInterface(object):
         return self.miner.REVISION
     
     def setWorkFactor(self, workFactor):
-        """Specify the multiple by which all ranges retrieved through
-        fetchRange must be divisible.
-        """
-        
-        self.workFactor = workFactor
+        """Deprecated. Kernels are now responsible for requesting optimal size
+        work"""
     
     def setMeta(self, var, value):
         """Set metadata for this kernel."""
         
         self.miner.connection.setMeta(var, value)
     
-    def fetchRange(self, size=None, workFactor=None):
+    def fetchRange(self, size=None):
         """Fetch a range from the WorkQueue, optionally specifying a size
         (in nonces) to include in the range.
         """
         
-        # If the kernel didn't specify a specific workFactor, use the default
-        # set via setWorkFactor.
-        if workFactor is None:
-            workFactor = self.workFactor
-        
         if size is None:
-            return self.miner.queue.fetchRange(workFactor=workFactor)
+            return self.miner.queue.fetchRange()
         else:
-            return self.miner.queue.fetchRange(size, workFactor)
+            return self.miner.queue.fetchRange(size)
     
     def addStaleCallback(self, callback):
         """Register a new function to be called, with no arguments, whenever
