@@ -53,7 +53,7 @@ class CommandLineOptions(object):
         parser = OptionParser(usage="%prog -u URL [-k kernel] [kernel params]")
         parser.add_option("-v", "--verbose", action="store_true",
             dest="verbose", default=False, help="show debug messages")
-        parser.add_option("-k", "--kernel", dest="kernel", default="poclbm",
+        parser.add_option("-k", "--kernel", dest="kernel", default="phatk2",
             help="the name of the kernel to use")
         parser.add_option("-u", "--url", dest="url", default=None,
             help="the URL of the mining server to work for [REQUIRED]")

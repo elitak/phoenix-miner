@@ -1,4 +1,4 @@
-# Copyright (C) 2011 by jedi95 <jedi95@gmail.com> and 
+# Copyright (C) 2011 by jedi95 <jedi95@gmail.com> and
 #                       CFSworks <CFSworks@gmail.com>
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -162,17 +162,16 @@ class WorkQueue(object):
         #return the range
         return nr
     
-    def fetchRange(self, size=0x10000, workFactor=1):
+    def fetchRange(self, size=0x10000):
         
         #make sure size is not too large
         size = min(size, 0x100000000)
 
-        #size must be a multiple of workFactor, which must be a multiple of 256
-        increment = 256 * int((workFactor + 255) / 256) #rounded up
-        size = increment * int(size / increment)
+        #size must be a multiple of 256
+        size = 256 * int(size / 256) #rounded up
         
         #make sure size is not too small
-        size = max(size, increment)
+        size = max(size, 256)
         
         #check if the current unit exists
         if self.currentUnit is not None:

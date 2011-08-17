@@ -1,4 +1,4 @@
-# Copyright (C) 2011 by jedi95 <jedi95@gmail.com> and 
+# Copyright (C) 2011 by jedi95 <jedi95@gmail.com> and
 #                       CFSworks <CFSworks@gmail.com>
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -39,7 +39,6 @@ class Miner(object):
         self.kernel = None
         self.queue = None
         self.idle = True
-        
         self.cores = []
         self.lastMetaRate = 0.0
         self.lastRateUpdate = time()
@@ -96,7 +95,6 @@ class Miner(object):
     def applyMeta(self):
         #Applies any static metafields to the connection, such as version,
         #kernel, hardware, etc.
-
         
         # It's important to note here that the name is already put in place by
         # the Options's makeConnection function, since the Options knows the
