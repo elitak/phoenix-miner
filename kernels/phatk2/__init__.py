@@ -150,7 +150,7 @@ class MiningKernel(object):
     OUTPUT_SIZE = WORKSIZE
     
     # This gets updated automatically by SVN.
-    REVISION = int('$Rev$'[6:-2])
+    REVISION = int('$Rev$'[6:-2]) if '$Rev$'.strip('$') != 'Rev' else 0
     
     def __init__(self, interface):
         platforms = cl.get_platforms()
