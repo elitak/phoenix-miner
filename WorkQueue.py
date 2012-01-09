@@ -36,8 +36,7 @@ class WorkUnit(object):
 
 """A NonceRange is a range of nonces from a WorkUnit, to be dispatched in a
 single execution of a mining kernel. The size of the NonceRange can be
-adjusted to tune the performance of the kernel, but will always
-be a multiple of 256.
+adjusted to tune the performance of the kernel.
 
 This class doesn't actually do anything, it's just a well-defined container
 that kernels can pull information out of.
@@ -66,7 +65,6 @@ class WorkQueue(object):
         self.currentUnit = None
         self.block = ''
         self.lastBlock = None
-        self.test = False
 
         # This is set externally. Not the best practice, but it can be changed
         # in the future.
@@ -166,9 +164,6 @@ class WorkQueue(object):
 
         #make sure size is not too large
         size = min(size, 0x100000000)
-
-        #size must be a multiple of 256
-        size = 256 * int(size / 256) #rounded up
 
         #make sure size is not too small
         size = max(size, 256)
